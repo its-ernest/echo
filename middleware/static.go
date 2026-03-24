@@ -197,10 +197,31 @@ func (config StaticConfig) ToMiddleware() (echo.MiddlewareFunc, error) {
 
 			p := c.Request().URL.Path
 			pathUnescape := true
-			if strings.HasSuffix(c.Path(), "*") { // When serving from a group, e.g. `/static*`.
+
+			// There might be multiiple signatures
+			// when serving from a group, e.g. `/static*`, `/static`.
+			// * Possibility 1 (wildcard route only):
+			//     only runs if route was defined as e.GET("/static/*", ...)
+			//     route "/static/*", request "/static/js/app.js" -> p is "js/app.js"
+			// * Possibility 2 (route without wildcard): removing the '404' bug
+			//     p would be set to exclude the c.Path() from the physical file lookup
+			//     for e.g:
+			//     this ensures we strip the route prefix (e.g. "/assets")
+			//     from the request path (e.g. "/assets/test.txt"),
+			// * Fallback:
+			//     avoid unexpected behavior by falling back to previous `p := c.Request().URL.Path`
+			// 	   if both possibilities behave wierd way
+			if strings.HasSuffix(c.Path(), "*") {
 				p = c.Param("*")
 				pathUnescape = !config.DisablePathUnescaping // because router could already do PathUnescape
 			}
+
+			if config.IgnoreBase && c.Path() != "/" && strings.HasPrefix(p, c.Path()) {
+				// config.ignorebase logic replaced with fewer allocations
+				// Strip the registered route prefix from the physical file lookup to avoid 404s in Groups.
+				p = p[len(c.Path()):] // slicing has fewer allocations than strings.TrimPrefix at this point
+			}
+
 			if pathUnescape {
 				p, err = url.PathUnescape(p)
 				if err != nil {
@@ -215,14 +236,19 @@ func (config StaticConfig) ToMiddleware() (echo.MiddlewareFunc, error) {
 			// See static_windows.go for Go 1.20+ filepath.Clean compatibility notes
 			filePath := path.Clean("./" + p)
 
-			if config.IgnoreBase {
-				routePath := path.Base(strings.TrimRight(c.Path(), "/*"))
-				baseURLPath := path.Base(p)
-				if baseURLPath == routePath {
-					i := strings.LastIndex(filePath, routePath)
-					filePath = filePath[:i] + strings.Replace(filePath[i:], routePath, "", 1)
+			/*
+				// Redundant in this new improvement and potential to
+				// corrupting already cleaned path
+
+				if config.IgnoreBase {
+					routePath := path.Base(strings.TrimRight(c.Path(), "/*"))
+					baseURLPath := path.Base(p)
+					if baseURLPath == routePath {
+						i := strings.LastIndex(filePath, routePath)
+						filePath = filePath[:i] + strings.Replace(filePath[i:], routePath, "", 1)
+					}
 				}
-			}
+			*/
 
 			if once != nil {
 				once.Do(func() {
